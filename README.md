@@ -67,10 +67,7 @@ GPU, plus an interactive map of what is taking up your disk.
     more. Build output (`node_modules`, `target`, `.venv`, DerivedData, …)
     is marked as reclaimable.
   - *Focus* hides the vitals so the map can use the whole window
-- Choose **Default**, **Mars**, **Liquid Glass**, or **Minimal** from the
-  dashboard header or the **Theme** submenu in the menu bar. Tessera remembers
-  the choice for both views. Mars stays dark. The other themes follow macOS
-  light and dark mode.
+- Choose a [theme](#themes) for the dashboard and menu bar.
 - The Dock icon only appears while the window is open
 
 <p align="center">
@@ -80,8 +77,16 @@ GPU, plus an interactive map of what is taking up your disk.
 
 <p align="center">
   <img src="docs/screenshots/dashboard-light.png" alt="The Tessera dashboard in light mode">
-  <br><em>Light appearance</em>
+  <br><em>Default theme in light mode</em>
 </p>
+
+## Themes
+
+Choose **Default**, **Mars**, **Liquid Glass**, or **Minimal** in the dashboard
+header or the menu bar’s **Theme** submenu. Tessera remembers your choice for
+both views. Mars stays dark. The other themes follow macOS light and dark mode.
+
+![Tessera’s dashboard and menu bar side by side in five appearances: charcoal and rust Mars, pearl and smoked Liquid Glass, and light and dark monochrome Minimal.](docs/screenshots/theme-previews.jpg)
 
 ## The disk index
 
