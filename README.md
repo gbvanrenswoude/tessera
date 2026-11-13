@@ -128,8 +128,8 @@ pins its Rust version in `rust-toolchain.toml`, so `rustup` downloads the
 right compiler on the first build.
 
 ```sh
-git clone https://github.com/gbvanrenswoude/macresourcevisualisator.git
-cd macresourcevisualisator
+git clone https://github.com/gbvanrenswoude/tessera.git
+cd tessera
 make install
 ```
 
