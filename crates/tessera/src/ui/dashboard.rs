@@ -14,6 +14,7 @@ use super::diskmap::DiskMap;
 use super::paint::{self, with_alpha};
 use super::theme::{self, Theme};
 use crate::macos;
+use crate::settings::ThemePreset;
 use crate::state::{Busyness, History, Shared};
 
 pub struct Dashboard {
@@ -21,7 +22,7 @@ pub struct Dashboard {
     icons: HashMap<String, Option<TextureHandle>>,
     gradient: Option<TextureHandle>,
     apps_by_memory: bool,
-    applied_dark: Option<bool>,
+    applied_theme: Option<(ThemePreset, egui::Theme)>,
 }
 
 struct Data {
@@ -40,7 +41,7 @@ impl Dashboard {
             icons: HashMap::new(),
             gradient: None,
             apps_by_memory: false,
-            applied_dark: None,
+            applied_theme: None,
         }
     }
 
@@ -88,10 +89,13 @@ impl Dashboard {
 
     pub fn ui(&mut self, ui: &mut Ui, shared: &Arc<Shared>) {
         let ctx = ui.ctx().clone();
-        let t = Theme::for_ctx(&ctx);
-        if self.applied_dark != Some(t.dark) {
-            t.apply(&ctx);
-            self.applied_dark = Some(t.dark);
+        let slot = ctx.theme();
+        let preset = shared.theme_preset();
+        let t = Theme::resolve(preset, slot == egui::Theme::Dark);
+        if self.applied_theme != Some((preset, slot)) {
+            t.apply(&ctx, slot);
+            ui.set_style(ctx.global_style());
+            self.applied_theme = Some((preset, slot));
         }
         let gradient = self.gradient(&ctx);
         let screen = ui.max_rect();
@@ -134,8 +138,18 @@ impl Dashboard {
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
 
-        // Title bar strip + header double as the window's drag handle.
-        let drag_rect = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + 88.0));
+        let left = rect.left() + MARGIN;
+        let right = rect.right() - MARGIN;
+        let width = right - left;
+        let header = Rect::from_min_max(
+            pos2(left, rect.top() + 34.0),
+            pos2(right, rect.top() + 82.0),
+        );
+        let picker =
+            Rect::from_center_size(pos2(right - 60.0, header.center().y), vec2(120.0, 28.0));
+
+        // Keep the appearance control clear of the window drag and double-click targets.
+        let drag_rect = Rect::from_min_max(rect.min, pos2(picker.left() - 8.0, rect.top() + 88.0));
         let drag = ui.interact(
             drag_rect,
             ui.scope_id().with("drag"),
@@ -149,16 +163,9 @@ impl Dashboard {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
 
-        let left = rect.left() + MARGIN;
-        let right = rect.right() - MARGIN;
-        let width = right - left;
-
-        // Header -------------------------------------------------------------
-        let header = Rect::from_min_max(
-            pos2(left, rect.top() + 34.0),
-            pos2(right, rect.top() + 82.0),
-        );
-        self.header(&p, header, shared, d, t, gradient);
+        let title = Rect::from_min_max(header.min, pos2(picker.left() - 14.0, header.bottom()));
+        self.header(&p, title, shared, d, t, gradient);
+        theme_picker(ui, picker, t, shared);
 
         let focus = self.disk_map.focused();
         let mut y = header.bottom() + 12.0;
@@ -197,7 +204,7 @@ impl Dashboard {
         gradient: egui::TextureId,
     ) {
         let logo = Rect::from_min_size(pos2(rect.left(), rect.center().y - 20.0), vec2(40.0, 40.0));
-        super::logo::paint(p, logo, gradient);
+        super::logo::paint(p, logo, gradient, t);
         let tx = logo.right() + 14.0;
         p.text(
             pos2(tx, rect.center().y - 2.0),
@@ -290,7 +297,12 @@ impl Dashboard {
             0.30,
             1.6,
         );
-        paint::area_chart(
+        let user_chart = if t.preset == ThemePreset::Minimal {
+            paint::area_chart_dashed
+        } else {
+            paint::area_chart
+        };
+        user_chart(
             p,
             chart,
             &user,
@@ -679,9 +691,14 @@ impl Dashboard {
             let chart = Rect::from_min_size(pos2(x, y + 19.0), vec2(w, row_h - 26.0));
             let max = fixed_max
                 .unwrap_or_else(|| series.iter().map(|(r, _)| r.max()).fold(1.0, f32::max) * 1.15);
-            for (ring, color) in series {
+            for (i, (ring, color)) in series.into_iter().enumerate() {
                 let values: Vec<f32> = ring.iter().collect();
-                paint::area_chart(p, chart, &values, ring.capacity(), max, color, 0.28, 1.4);
+                let draw = if i == 1 && t.preset == ThemePreset::Minimal {
+                    paint::area_chart_dashed
+                } else {
+                    paint::area_chart
+                };
+                draw(p, chart, &values, ring.capacity(), max, color, 0.28, 1.4);
             }
             y += row_h;
         }
@@ -853,6 +870,23 @@ fn heat(v: f32, base: Color32, t: &Theme) -> Color32 {
 
 fn background(p: &egui::Painter, rect: Rect, t: &Theme) {
     p.rect_filled(rect, 0.0, t.bg);
+    if t.preset == ThemePreset::Minimal {
+        return;
+    }
+    if t.preset == ThemePreset::LiquidGlass {
+        paint::glow(
+            p,
+            rect.left_bottom() + vec2(rect.width() * 0.22, 0.0),
+            rect.width() * 0.62,
+            t.bg_glow_b,
+        );
+        paint::glow(
+            p,
+            rect.center() + vec2(rect.width() * 0.26, 0.0),
+            rect.width() * 0.45,
+            t.bg_glow_a,
+        );
+    }
     paint::glow(
         p,
         pos2(rect.left() + rect.width() * 0.18, rect.top() - 40.0),
@@ -865,6 +899,52 @@ fn background(p: &egui::Painter, rect: Rect, t: &Theme) {
         rect.width() * 0.45,
         t.bg_glow_b,
     );
+}
+
+fn theme_picker(ui: &mut Ui, rect: Rect, current: &Theme, shared: &Shared) {
+    let mut picker = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("theme-picker")
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    picker.spacing_mut().interact_size.y = rect.height();
+    picker.spacing_mut().button_padding.x = 8.0;
+    let dark = picker.ctx().theme() == egui::Theme::Dark;
+    let was_open = egui::ComboBox::is_open(picker.ctx(), picker.make_persistent_id("theme"));
+    egui::ComboBox::from_id_salt("theme")
+        .width(rect.width())
+        .selected_text(theme_option(current))
+        .show_ui(&mut picker, |ui| {
+            for preset in ThemePreset::ALL {
+                let preview = Theme::resolve(preset, dark);
+                if ui
+                    .selectable_label(preset == current.preset, theme_option(&preview))
+                    .clicked()
+                {
+                    shared.set_theme_preset(preset);
+                }
+            }
+        })
+        .response
+        .on_hover_text("Choose a theme");
+    if was_open {
+        // Escape dismisses the picker without also navigating the disk map.
+        ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    }
+}
+
+fn theme_option(t: &Theme) -> impl egui::IntoAtoms<'static> {
+    let (a, b) = (t.blue, t.violet);
+    let swatch = egui::Atom::paint(vec2(17.0, 12.0), move |ui, args| {
+        let start = args.rect.left_center() + vec2(5.0, 0.0);
+        ui.painter().circle_filled(start, 5.0, a);
+        ui.painter().circle_filled(start + vec2(7.0, 0.0), 4.0, b);
+    });
+    (
+        swatch,
+        egui::RichText::new(t.preset.label()).font(theme::font(12.0, theme::MEDIUM)),
+    )
 }
 
 /// Split `rect` horizontally by weights.

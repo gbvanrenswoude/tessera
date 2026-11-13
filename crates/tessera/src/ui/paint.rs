@@ -10,6 +10,7 @@ use egui::{
 };
 
 use super::theme::{self, Theme};
+use crate::settings::ThemePreset;
 
 pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -54,19 +55,81 @@ pub fn glow(p: &Painter, center: Pos2, radius: f32, color: Color32) {
 }
 
 pub fn card(p: &Painter, rect: Rect, t: &Theme) {
-    let r = CornerRadius::same(16);
-    let shadow = Shadow {
-        offset: [0, 6],
-        blur: 24,
-        spread: 0,
-        color: t.shadow,
+    let radius = match t.preset {
+        ThemePreset::Default => 16,
+        ThemePreset::Mars => 10,
+        ThemePreset::LiquidGlass => 22,
+        ThemePreset::Minimal => 5,
     };
-    p.add(shadow.as_shape(rect, r));
+    let r = CornerRadius::same(radius);
+    if t.preset != ThemePreset::Minimal {
+        let shadow = Shadow {
+            offset: [0, 6],
+            blur: if t.preset == ThemePreset::Mars {
+                12
+            } else {
+                24
+            },
+            spread: 0,
+            color: t.shadow,
+        };
+        p.add(shadow.as_shape(rect, r));
+    }
     p.rect_filled(rect, r, t.card);
+    if t.preset == ThemePreset::LiquidGlass {
+        glass_reflection(p, rect.shrink(1.0), f32::from(radius - 1), t);
+        p.rect_stroke(
+            rect.shrink(1.0),
+            radius - 1,
+            Stroke::new(1.0, with_alpha(t.highlight, 0.27)),
+            StrokeKind::Inside,
+        );
+    }
     p.rect_stroke(rect, r, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    // Faint top highlight gives the glass a bevel.
-    let top = Rect::from_min_size(rect.min + vec2(16.0, 0.5), vec2(rect.width() - 32.0, 1.0));
-    p.rect_filled(top, 0.0, t.highlight);
+    if t.preset != ThemePreset::Minimal {
+        let inset = f32::from(radius);
+        let top = Rect::from_min_size(
+            rect.min + vec2(inset, 0.5),
+            vec2(rect.width() - 2.0 * inset, 1.0),
+        );
+        p.rect_filled(top, 0.0, t.highlight);
+    }
+}
+
+/// A translucent wash fading between the specular top edge and the blue lower rim.
+fn glass_reflection(p: &Painter, rect: Rect, radius: f32, t: &Theme) {
+    let radius = radius.min(0.5 * rect.width().min(rect.height())).max(0.0);
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(rect.center(), Color32::TRANSPARENT);
+    let corners = [
+        (
+            rect.left_top() + vec2(radius, radius),
+            with_alpha(t.highlight, 0.33),
+        ),
+        (
+            rect.right_top() + vec2(-radius, radius),
+            with_alpha(t.highlight, 0.08),
+        ),
+        (
+            rect.right_bottom() - vec2(radius, radius),
+            with_alpha(t.cyan, 0.10),
+        ),
+        (
+            rect.left_bottom() + vec2(radius, -radius),
+            Color32::TRANSPARENT,
+        ),
+    ];
+    for (i, (center, color)) in corners.into_iter().enumerate() {
+        for j in 0..=5 {
+            let angle = (2.0 + i as f32 + j as f32 / 5.0) * std::f32::consts::FRAC_PI_2;
+            mesh.colored_vertex(center + vec2(angle.cos(), angle.sin()) * radius, color);
+        }
+    }
+    let last = mesh.vertices.len() as u32 - 1;
+    for i in 1..=last {
+        mesh.add_triangle(0, i, i % last + 1);
+    }
+    p.add(Shape::mesh(mesh));
 }
 
 /// Small uppercase, letter-spaced section title.
@@ -125,8 +188,45 @@ pub fn area_chart(
     fill_alpha: f32,
     line_width: f32,
 ) {
+    let pts = area_fill(p, rect, values, capacity, max, color, fill_alpha);
+    if !pts.is_empty() {
+        p.add(Shape::line(pts, PathStroke::new(line_width, color)));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn area_chart_dashed(
+    p: &Painter,
+    rect: Rect,
+    values: &[f32],
+    capacity: usize,
+    max: f32,
+    color: Color32,
+    fill_alpha: f32,
+    line_width: f32,
+) {
+    let pts = area_fill(p, rect, values, capacity, max, color, fill_alpha);
+    if !pts.is_empty() {
+        p.extend(Shape::dashed_line(
+            &pts,
+            Stroke::new(line_width, color),
+            5.0,
+            3.0,
+        ));
+    }
+}
+
+fn area_fill(
+    p: &Painter,
+    rect: Rect,
+    values: &[f32],
+    capacity: usize,
+    max: f32,
+    color: Color32,
+    fill_alpha: f32,
+) -> Vec<Pos2> {
     if values.len() < 2 || rect.width() <= 0.0 {
-        return;
+        return Vec::new();
     }
     let max = max.max(1e-6);
     let step = rect.width() / (capacity.max(2) - 1) as f32;
@@ -158,7 +258,7 @@ pub fn area_chart(
         mesh.add_triangle(a + 1, a + 3, a + 2);
     }
     p.add(Shape::mesh(mesh));
-    p.add(Shape::line(pts, PathStroke::new(line_width, color)));
+    pts
 }
 
 pub fn gridlines(p: &Painter, rect: Rect, rows: usize, t: &Theme) {

@@ -3,7 +3,8 @@
 use egui::epaint::{PathStroke, TextureId};
 use egui::{Color32, CornerRadius, Painter, Rect, Shape, pos2, vec2};
 
-use super::paint;
+use super::{paint, theme::Theme};
+use crate::settings::ThemePreset;
 
 const TILES: [(f32, f32, f32, f32, u32); 4] = [
     (0.0, 0.0, 0.56, 1.0, 0x8B6CFF),
@@ -16,11 +17,27 @@ fn rgb(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
-pub fn paint(p: &Painter, rect: Rect, gradient: TextureId) {
+pub fn paint(p: &Painter, rect: Rect, gradient: TextureId, t: &Theme) {
     let s = rect.width();
     let radius = CornerRadius::from(s * 0.25);
-    p.rect_filled(rect, radius, rgb(0x161B2E));
-    paint::gradient_rect(p, rect, radius, rgb(0x232A47), gradient);
+    match t.preset {
+        ThemePreset::Default => {
+            p.rect_filled(rect, radius, rgb(0x161B2E));
+            paint::gradient_rect(p, rect, radius, rgb(0x232A47), gradient);
+        }
+        ThemePreset::Minimal => {
+            p.rect_filled(rect, radius, t.text);
+        }
+        _ => {
+            p.rect_filled(rect, radius, t.popup);
+            p.rect_stroke(
+                rect,
+                radius,
+                egui::Stroke::new(1.0, t.border),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
     let inner = rect.shrink(s * 0.16);
     let gap = s * 0.035;
     for (i, (x, y, w, h, color)) in TILES.iter().enumerate() {
@@ -44,7 +61,16 @@ pub fn paint(p: &Painter, rect: Rect, gradient: TextureId) {
             r.max.y -= gap / 2.0;
         }
         let cr = CornerRadius::from(if i == 0 { s * 0.07 } else { s * 0.055 });
-        paint::gradient_rect(p, r, cr, rgb(*color), gradient);
+        let fill = match t.preset {
+            ThemePreset::Default => rgb(*color),
+            ThemePreset::Minimal => paint::lerp_color(t.bg, t.text, [0.0, 0.28, 0.45, 0.60][i]),
+            _ => [t.violet, t.teal, t.pink, t.amber][i],
+        };
+        if t.preset == ThemePreset::Minimal {
+            p.rect_filled(r, cr, fill);
+        } else {
+            paint::gradient_rect(p, r, cr, fill, gradient);
+        }
         if i == 0 {
             let pts = [
                 (0.10, 0.60),
@@ -59,9 +85,14 @@ pub fn paint(p: &Painter, rect: Rect, gradient: TextureId) {
                 .iter()
                 .map(|(px, py)| pos2(r.left() + px * r.width(), r.top() + py * r.height()))
                 .collect();
+            let line_color = if t.preset == ThemePreset::Default {
+                Color32::WHITE
+            } else {
+                t.tile_ink(fill)
+            };
             p.add(Shape::line(
                 line,
-                PathStroke::new((s * 0.035).max(1.2), Color32::WHITE),
+                PathStroke::new((s * 0.035).max(1.2), line_color),
             ));
         }
     }

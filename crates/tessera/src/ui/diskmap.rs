@@ -22,6 +22,7 @@ use tessera_core::treemap::{self, squarify};
 use super::paint::{self, shade, with_alpha};
 use super::theme::{self, Theme};
 use crate::macos;
+use crate::settings::ThemePreset;
 use crate::state::Shared;
 
 mod growth;
@@ -90,6 +91,7 @@ const LIST_WIDTH: f32 = 300.0;
 pub struct DiskMap {
     stack: Vec<Level>,
     layout: Option<Layout>,
+    layout_theme: Option<(ThemePreset, bool)>,
     transition: Option<Transition>,
     hovered: Option<(usize, Option<usize>)>,
     list_hovered: Option<usize>,
@@ -115,6 +117,13 @@ impl DiskMap {
         t: &Theme,
         gradient: TextureId,
     ) {
+        let theme_key = (t.preset, t.dark);
+        if self.layout_theme != Some(theme_key) {
+            // Entries in both layouts carry the palette used at build time.
+            self.layout = None;
+            self.transition = None;
+            self.layout_theme = Some(theme_key);
+        }
         if self.stack.is_empty() {
             self.stack.push(Level::Overview);
         }
@@ -1017,11 +1026,13 @@ fn draw_layout(
         let is_hovered = hovered == Some((tile.entry, tile.child));
         let parent_hovered =
             hovered.is_some_and(|h| h.0 == tile.entry && h.1.is_none()) && tile.child.is_some();
-        let radius = CornerRadius::from((r.width().min(r.height()) / 3.0).min(if tile.framed {
-            9.0
-        } else {
-            6.0
-        }));
+        let max_radius = match (t.preset, tile.framed) {
+            (ThemePreset::Minimal, _) => 2.0,
+            (ThemePreset::Mars, _) => 4.0,
+            (_, true) => 9.0,
+            (_, false) => 6.0,
+        };
+        let radius = CornerRadius::from((r.width().min(r.height()) / 3.0).min(max_radius));
 
         if tile.framed {
             let fill = with_alpha(e.color, if t.dark { 0.17 } else { 0.14 });
@@ -1055,9 +1066,7 @@ fn draw_layout(
             continue;
         }
 
-        if e.synthetic {
-            p.rect_filled(r, radius, e.color);
-        } else {
+        if !e.synthetic && t.preset == ThemePreset::Default {
             paint::gradient_rect(p, r, radius, e.color, gradient);
             if r.height() > 10.0 && r.width() > 10.0 {
                 let top = Rect::from_min_size(
@@ -1066,37 +1075,69 @@ fn draw_layout(
                 );
                 p.rect_filled(top, 0.0, Color32::from_white_alpha(46));
             }
+        } else {
+            p.rect_filled(r, radius, e.color);
+            if !e.synthetic && t.preset == ThemePreset::LiquidGlass {
+                p.rect_stroke(
+                    r,
+                    radius,
+                    Stroke::new(1.0, with_alpha(t.highlight, 0.62)),
+                    StrokeKind::Inside,
+                );
+            }
         }
-        if parent_hovered {
-            p.rect_filled(r, radius, Color32::from_white_alpha(14));
-        }
-        if is_hovered {
-            p.rect_filled(r, radius, Color32::from_white_alpha(30));
-            p.rect_stroke(
-                r,
-                radius,
-                Stroke::new(1.5, Color32::from_white_alpha(230)),
-                StrokeKind::Inside,
-            );
+        let mut fill = e.color;
+        if is_hovered || parent_hovered {
+            let edge = if t.preset == ThemePreset::Default {
+                Color32::WHITE
+            } else {
+                t.tile_ink(fill)
+            };
+            let overlay = edge.gamma_multiply_u8(if is_hovered { 30 } else { 14 });
+            p.rect_filled(r, radius, overlay);
+            fill = fill.blend(overlay);
+            if is_hovered {
+                p.rect_stroke(
+                    r,
+                    radius,
+                    Stroke::new(1.5, edge.gamma_multiply_u8(230)),
+                    StrokeKind::Inside,
+                );
+            }
         }
 
         if text && r.width() > 44.0 && r.height() > 22.0 {
+            let ink = if t.preset == ThemePreset::Default {
+                t.tile_text
+            } else {
+                t.tile_ink(fill)
+            };
+            let draw_label = |g, pos, color| {
+                if t.preset == ThemePreset::Default {
+                    paint::shadowed(p, g, pos, color);
+                } else {
+                    p.galley_with_override_text_color(pos, g, color);
+                }
+            };
             let big = r.width() > 120.0 && r.height() > 52.0;
             let label_font = theme::font(if big { 13.0 } else { 11.5 }, theme::SEMIBOLD);
-            let label = paint::elided(p, &e.label, label_font, t.tile_text, r.width() - 14.0);
+            let label = paint::elided(p, &e.label, label_font, ink, r.width() - 14.0);
             let lh = label.size().y;
-            paint::shadowed(p, label, pos2(r.left() + 7.0, r.top() + 5.0), t.tile_text);
+            draw_label(label, pos2(r.left() + 7.0, r.top() + 5.0), ink);
             if r.height() > 36.0 {
                 let size = p.layout_no_wrap(
                     format::bytes_short(e.size),
                     theme::font(if big { 12.0 } else { 10.5 }, theme::MEDIUM),
-                    t.tile_text,
+                    ink,
                 );
-                paint::shadowed(
-                    p,
+                draw_label(
                     size,
                     pos2(r.left() + 7.0, r.top() + 6.0 + lh),
-                    Color32::from_white_alpha(205),
+                    if t.preset == ThemePreset::Default {
+                        Color32::from_white_alpha(205)
+                    } else {
+                        ink
+                    },
                 );
             }
         }
@@ -1199,19 +1240,21 @@ fn tooltip(
         spread: 0,
         color: Color32::from_black_alpha(if t.dark { 120 } else { 40 }),
     };
-    p.add(shadow.as_shape(rect, CornerRadius::same(12)));
-    let bg = if t.dark {
-        Color32::from_rgb(0x1A, 0x1F, 0x29)
+    let radius = CornerRadius::same(if t.preset == ThemePreset::Minimal {
+        5
     } else {
-        Color32::WHITE
+        12
+    });
+    if t.preset != ThemePreset::Minimal {
+        p.add(shadow.as_shape(rect, radius));
+    }
+    let bg = match (t.preset, t.dark) {
+        (ThemePreset::Default, true) => Color32::from_rgb(0x1A, 0x1F, 0x29),
+        (ThemePreset::Default, false) => Color32::WHITE,
+        _ => t.popup,
     };
-    p.rect_filled(rect, CornerRadius::same(12), bg);
-    p.rect_stroke(
-        rect,
-        CornerRadius::same(12),
-        Stroke::new(1.0, t.border),
-        StrokeKind::Inside,
-    );
+    p.rect_filled(rect, radius, bg);
+    p.rect_stroke(rect, radius, Stroke::new(1.0, t.border), StrokeKind::Inside);
     p.circle_filled(
         pos2(rect.left() + pad + 4.0, rect.top() + pad + 9.0),
         4.5,
@@ -1374,15 +1417,20 @@ impl DiskMap {
         }
         let c = body.center();
         let panel = Rect::from_center_size(c, vec2(380.0, 128.0));
-        let bg = if t.dark {
-            Color32::from_rgba_unmultiplied(16, 19, 26, 230)
-        } else {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 235)
+        let bg = match (t.preset, t.dark) {
+            (ThemePreset::Default, true) => Color32::from_rgba_unmultiplied(16, 19, 26, 230),
+            (ThemePreset::Default, false) => Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+            _ => t.popup,
         };
-        p.rect_filled(panel, CornerRadius::same(16), bg);
+        let radius = CornerRadius::same(if t.preset == ThemePreset::Minimal {
+            5
+        } else {
+            16
+        });
+        p.rect_filled(panel, radius, bg);
         p.rect_stroke(
             panel,
-            CornerRadius::same(16),
+            radius,
             Stroke::new(1.0, t.border),
             StrokeKind::Inside,
         );
@@ -1709,6 +1757,7 @@ mod tests {
         let cfg = ScanConfig {
             min_dir: 0,
             min_file: 1 << 30,
+            threads: 1,
             ..ScanConfig::for_path(&dir)
         };
         let index = scan(&cfg, &ScanProgress::default()).unwrap();
@@ -1729,7 +1778,7 @@ mod tests {
         let area = Rect::from_min_size(pos2(20.0, 20.0), vec2(1160.0, 760.0));
 
         let mut time = 0.0;
-        let mut frame = |map: &mut DiskMap, events: Vec<Event>| {
+        let mut frame = |map: &mut DiskMap, events: Vec<Event>, theme: &Theme| {
             time += 1.0 / 60.0;
             let input = RawInput {
                 screen_rect: Some(screen),
@@ -1738,12 +1787,12 @@ mod tests {
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| {
-                map.ui(ui, area, &shared, &snap, &t, TextureId::default())
+                map.ui(ui, area, &shared, &snap, theme, TextureId::default())
             });
             out.textures_delta.clear();
         };
-        frame(&mut map, vec![]);
-        frame(&mut map, vec![]);
+        frame(&mut map, vec![], &t);
+        frame(&mut map, vec![], &t);
         assert_eq!(map.stack, vec![Level::Overview]);
 
         // The overview has one group (Projects) with the three projects nested.
@@ -1765,10 +1814,10 @@ mod tests {
             pressed,
             modifiers: Modifiers::NONE,
         };
-        frame(&mut map, vec![Event::PointerMoved(pos)]);
+        frame(&mut map, vec![Event::PointerMoved(pos)], &t);
         assert_eq!(map.hovered, Some((alpha.entry, alpha.child)));
-        frame(&mut map, vec![press(true)]);
-        frame(&mut map, vec![press(false)]);
+        frame(&mut map, vec![press(true)], &t);
+        frame(&mut map, vec![press(false)], &t);
         assert_eq!(
             map.stack.len(),
             3,
@@ -1779,9 +1828,23 @@ mod tests {
         assert_eq!(map.layout.as_ref().unwrap().title, "alpha");
         assert!(map.transition.is_some());
 
-        // Let the animation finish, then go back up with Escape.
-        for _ in 0..40 {
-            frame(&mut map, vec![]);
+        // Switching materials mid-zoom must keep the folder and replace both
+        // the departing tiles and the colors shared by the map and its list.
+        let stack = map.stack.clone();
+        let minimal = Theme::resolve(ThemePreset::Minimal, true);
+        frame(&mut map, vec![], &minimal);
+        assert!(map.transition.is_none());
+        assert_eq!(map.stack, stack);
+        let layout = map.layout.as_ref().unwrap();
+        assert_eq!(layout.title, "alpha");
+        assert!(!layout.entries.is_empty());
+        for entry in layout
+            .entries
+            .iter()
+            .flat_map(|e| std::iter::once(e).chain(&e.children))
+        {
+            assert_eq!(entry.color.r(), entry.color.g(), "{}", entry.label);
+            assert_eq!(entry.color.g(), entry.color.b(), "{}", entry.label);
         }
         let esc = Event::Key {
             key: Key::Escape,
@@ -1790,7 +1853,7 @@ mod tests {
             repeat: false,
             modifiers: Modifiers::NONE,
         };
-        frame(&mut map, vec![esc]);
+        frame(&mut map, vec![esc], &minimal);
         assert_eq!(map.stack.len(), 2);
         assert_eq!(map.stack[1], Level::Group(Category::Projects));
         std::fs::remove_dir_all(&dir).unwrap();

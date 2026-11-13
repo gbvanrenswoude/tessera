@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tessera_core::metrics::{AppUsage, Pressure, Snapshot, SystemInfo};
 
 use crate::disk::DiskService;
-use crate::settings::Settings;
+use crate::settings::{Settings, ThemePreset};
 
 /// Seconds of history kept for the charts.
 pub const HISTORY: usize = 120;
@@ -161,6 +161,22 @@ impl Shared {
         if let Some(ctx) = self.egui.get() {
             ctx.request_repaint();
         }
+    }
+
+    pub fn theme_preset(&self) -> ThemePreset {
+        self.settings.lock().unwrap().theme
+    }
+
+    pub fn set_theme_preset(&self, preset: ThemePreset) {
+        {
+            let mut settings = self.settings.lock().unwrap();
+            if settings.theme == preset {
+                return;
+            }
+            settings.theme = preset;
+            settings.save();
+        }
+        self.wake();
     }
 
     pub fn ui_active(&self) -> bool {

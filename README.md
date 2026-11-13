@@ -67,8 +67,11 @@ GPU, plus an interactive map of what is taking up your disk.
     more. Build output (`node_modules`, `target`, `.venv`, DerivedData, …)
     is marked as reclaimable.
   - *Focus* hides the vitals so the map can use the whole window
-- Follows the system light/dark appearance; the Dock icon only appears
-  while the window is open
+- Choose **Default**, **Mars**, **Liquid Glass**, or **Minimal** from the
+  dashboard header or the **Theme** submenu in the menu bar. Tessera remembers
+  the choice for both views. Mars stays dark. The other themes follow macOS
+  light and dark mode.
+- The Dock icon only appears while the window is open
 
 <p align="center">
   <img src="docs/screenshots/disk-map-projects.png" alt="The disk map zoomed into Projects, with each project's git history, build output and sources as blocks">

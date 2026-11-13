@@ -76,15 +76,35 @@ pub fn set_dock_visible(visible: bool) {
     app.setActivationPolicy(policy);
 }
 
-/// The appearance forced with `TESSERA_THEME=dark` / `light`, if any.
-pub fn forced_appearance() -> Option<Retained<objc2_app_kit::NSAppearance>> {
+pub fn appearance(dark: bool) -> Option<Retained<objc2_app_kit::NSAppearance>> {
     use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
-    let name = match std::env::var("TESSERA_THEME").as_deref() {
-        Ok("dark") => unsafe { NSAppearanceNameDarkAqua },
-        Ok("light") => unsafe { NSAppearanceNameAqua },
-        _ => return None,
+    let name = unsafe {
+        if dark {
+            NSAppearanceNameDarkAqua
+        } else {
+            NSAppearanceNameAqua
+        }
     };
     NSAppearance::appearanceNamed(name)
+}
+
+pub fn appearance_is_dark(appearance: &objc2_app_kit::NSAppearance) -> bool {
+    use objc2_app_kit::{NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+    unsafe {
+        let names = NSArray::from_slice(&[NSAppearanceNameDarkAqua, NSAppearanceNameAqua]);
+        appearance
+            .bestMatchFromAppearancesWithNames(&names)
+            .is_some_and(|name| name.isEqualToString(NSAppearanceNameDarkAqua))
+    }
+}
+
+/// The appearance forced with `TESSERA_THEME=dark` / `light`, if any.
+pub fn forced_appearance() -> Option<Retained<objc2_app_kit::NSAppearance>> {
+    match std::env::var("TESSERA_THEME").as_deref() {
+        Ok("dark") => appearance(true),
+        Ok("light") => appearance(false),
+        _ => None,
+    }
 }
 
 /// Apply `TESSERA_THEME` to the whole app (window frame included) instead

@@ -15,11 +15,11 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSBezierPath, NSColor, NSCompositingOperation,
+    NSAppearanceCustomization, NSApplication, NSBezierPath, NSColor, NSCompositingOperation,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontAttributeName, NSFontWeightMedium,
-    NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName, NSGraphicsContext,
-    NSImage, NSKernAttributeName, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSStringDrawing, NSVariableStatusItemLength, NSView, NSWorkspace,
+    NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName, NSGradient,
+    NSGraphicsContext, NSImage, NSKernAttributeName, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSStatusBar, NSStatusItem, NSStringDrawing, NSVariableStatusItemLength, NSView, NSWorkspace,
 };
 use objc2_foundation::{
     NSAttributedStringKey, NSDictionary, NSNumber, NSPoint, NSRect, NSRunLoop,
@@ -30,7 +30,9 @@ use tessera_core::format;
 use tessera_core::metrics::{AppUsage, CoreKind, Pressure, Snapshot};
 
 use crate::macos::{self, LoginItem};
+use crate::settings::ThemePreset;
 use crate::state::{Busyness, History, Shared};
+use crate::ui::theme::Theme;
 
 const WIDTH: f64 = 304.0;
 const PAD: f64 = 16.0;
@@ -52,6 +54,8 @@ pub struct TargetIvars {
     stats: RefCell<Option<Retained<StatsView>>>,
     cpu_toggle: RefCell<Option<Retained<NSMenuItem>>>,
     login_toggle: RefCell<Option<Retained<NSMenuItem>>>,
+    themes: RefCell<Option<Retained<NSMenu>>>,
+    applied_theme: Cell<Option<(ThemePreset, bool)>>,
     rescan: RefCell<Option<Retained<NSMenuItem>>>,
     title: RefCell<String>,
 }
@@ -95,6 +99,14 @@ define_class!(
                 eprintln!("tessera: login item: {e}");
             }
             self.refresh_items();
+        }
+
+        #[unsafe(method(selectTheme:))]
+        fn select_theme(&self, sender: &NSMenuItem) {
+            if let Some(preset) = ThemePreset::ALL.get(sender.tag() as usize) {
+                self.ivars().shared.set_theme_preset(*preset);
+                self.refresh_theme();
+            }
         }
 
         #[unsafe(method(quit:))]
@@ -151,6 +163,8 @@ impl MenuTarget {
             stats: RefCell::new(None),
             cpu_toggle: RefCell::new(None),
             login_toggle: RefCell::new(None),
+            themes: RefCell::new(None),
+            applied_theme: Cell::new(None),
             rescan: RefCell::new(None),
             title: RefCell::new(String::new()),
         });
@@ -189,6 +203,7 @@ impl MenuTarget {
 
     fn refresh_items(&self) {
         let iv = self.ivars();
+        self.refresh_theme();
         if let Some(t) = iv.cpu_toggle.borrow().as_ref() {
             let on = iv
                 .shared
@@ -224,6 +239,45 @@ impl MenuTarget {
             t.setEnabled(view.scan.is_none());
         }
     }
+
+    fn refresh_theme(&self) {
+        let iv = self.ivars();
+        let preset = iv.shared.theme_preset();
+        let mtm = MainThreadMarker::from(self);
+        let app = NSApplication::sharedApplication(mtm);
+        let dark = match preset {
+            ThemePreset::Default => false, // AppKit owns the default menu appearance.
+            ThemePreset::Mars => true,
+            _ => macos::appearance_is_dark(&app.effectiveAppearance()),
+        };
+        if iv.applied_theme.replace(Some((preset, dark))) == Some((preset, dark)) {
+            return;
+        }
+        let appearance = if preset == ThemePreset::Default {
+            macos::forced_appearance()
+        } else {
+            macos::appearance(dark)
+        };
+        if let Some(menu) = iv.item.borrow().as_ref().and_then(|i| i.menu(mtm)) {
+            menu.setAppearance(appearance.as_deref());
+        }
+        if let Some(themes) = iv.themes.borrow().as_ref() {
+            themes.setAppearance(appearance.as_deref());
+            for (index, choice) in ThemePreset::ALL.iter().enumerate() {
+                if let Some(item) = themes.itemAtIndex(index as isize) {
+                    item.setState(if *choice == preset {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                }
+            }
+        }
+        if let Some(view) = iv.stats.borrow().as_ref() {
+            view.setAppearance(appearance.as_deref());
+            view.setNeedsDisplay(true);
+        }
+    }
 }
 
 pub fn start_scan(shared: &Arc<Shared>, priority: ScanPriority) {
@@ -257,10 +311,6 @@ impl StatusBar {
 
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
-        // Menu bar menus follow the menu bar, not the app's appearance.
-        if let Some(appearance) = macos::forced_appearance() {
-            menu.setAppearance(Some(&appearance));
-        }
         menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
 
         let open = menu_item(
@@ -281,6 +331,17 @@ impl StatusBar {
 
         let rescan = menu_item(mtm, "Rescan Disk", Some(sel!(rescan:)), "", &target);
         menu.addItem(&rescan);
+        let theme_item = menu_item(mtm, "Theme", None, "", &target);
+        let themes = NSMenu::new(mtm);
+        themes.setTitle(&NSString::from_str("Theme"));
+        themes.setAutoenablesItems(false);
+        for (index, preset) in ThemePreset::ALL.iter().enumerate() {
+            let choice = menu_item(mtm, preset.label(), Some(sel!(selectTheme:)), "", &target);
+            choice.setTag(index as isize);
+            themes.addItem(&choice);
+        }
+        theme_item.setSubmenu(Some(&themes));
+        menu.addItem(&theme_item);
         let cpu_toggle = menu_item(
             mtm,
             "Show CPU in Menu Bar",
@@ -303,6 +364,7 @@ impl StatusBar {
             *iv.stats.borrow_mut() = Some(stats);
             *iv.cpu_toggle.borrow_mut() = Some(cpu_toggle);
             *iv.login_toggle.borrow_mut() = Some(login_toggle);
+            *iv.themes.borrow_mut() = Some(themes);
             *iv.rescan.borrow_mut() = Some(rescan);
         }
         target.update_title();
@@ -443,6 +505,17 @@ impl StatsView {
             .map(|o| o.reclaimable())
             .unwrap_or(0);
         let _ = self.ivars().height.get();
+        let preset = shared.theme_preset();
+        let theme = (preset != ThemePreset::Default).then(|| {
+            Theme::resolve(
+                preset,
+                macos::appearance_is_dark(&self.effectiveAppearance()),
+            )
+        });
+        if let Some(t) = &theme {
+            draw_backdrop(self.bounds(), t);
+        }
+        let colors = MenuColors::new(theme.as_ref());
         let d = Draw::new();
         let w = WIDTH - 2.0 * PAD;
         let x = PAD;
@@ -451,28 +524,22 @@ impl StatsView {
         // Summary: one word for how busy the machine is.
         let busy = Busyness::of(&snap);
         let dot = match busy.severity() {
-            0 => NSColor::systemGreenColor(),
-            1 => NSColor::systemYellowColor(),
-            2 => NSColor::systemOrangeColor(),
-            _ => NSColor::systemRedColor(),
+            0 => &colors.green,
+            1 => &colors.amber,
+            2 => &colors.orange,
+            _ => &colors.red,
         };
         fill_oval(
             NSRect::new(NSPoint::new(x, y + 5.5), NSSize::new(9.0, 9.0)),
-            &dot,
+            dot,
         );
-        d.text(
-            busy.label(),
-            x + 16.0,
-            y,
-            &d.headline,
-            &NSColor::labelColor(),
-        );
+        d.text(busy.label(), x + 16.0, y, &d.headline, &colors.text);
         d.text_right(
             &format!("Up {}", format::duration(snap.uptime)),
             x + w,
             y + 3.0,
             &d.small,
-            &NSColor::tertiaryLabelColor(),
+            &colors.muted,
         );
         y += 21.0;
         d.text_clipped(
@@ -481,30 +548,31 @@ impl StatsView {
             y,
             w,
             &d.small,
-            &NSColor::secondaryLabelColor(),
+            &colors.secondary,
         );
         y += 26.0;
 
         // CPU
-        d.section("CPU", x, y);
+        d.section(&colors.secondary, "CPU", x, y);
         d.text_right(
             &format::percent(snap.cpu.total),
             x + w,
             y - 2.0,
             &d.value,
-            &NSColor::labelColor(),
+            &colors.text,
         );
         y += 19.0;
         sparkline(
             NSRect::new(NSPoint::new(x, y), NSSize::new(w, 26.0)),
             &history,
-            &NSColor::systemBlueColor(),
+            &colors,
         );
         y += 32.0;
         core_bars(
             NSRect::new(NSPoint::new(x, y), NSSize::new(w, 24.0)),
             &snap,
             &cores,
+            &colors,
         );
         y += 28.0;
         // Cluster captions under each group of bars.
@@ -523,7 +591,7 @@ impl StatsView {
                 gx + (gw - size.width) / 2.0,
                 y,
                 &d.tiny,
-                &NSColor::tertiaryLabelColor(),
+                &colors.muted,
             );
             gx += gw + gap;
         }
@@ -536,12 +604,12 @@ impl StatsView {
             snap.load[1],
             snap.load[2]
         );
-        d.text(&detail, x, y, &d.small, &NSColor::secondaryLabelColor());
+        d.text(&detail, x, y, &d.small, &colors.secondary);
         y += 28.0;
 
         // Memory
         let m = &snap.memory;
-        d.section("MEMORY", x, y);
+        d.section(&colors.secondary, "MEMORY", x, y);
         d.text_right(
             &format!(
                 "{} of {}",
@@ -551,26 +619,27 @@ impl StatsView {
             x + w,
             y - 2.0,
             &d.value,
-            &NSColor::labelColor(),
+            &colors.text,
         );
         y += 20.0;
         let total = m.total.max(1) as f64;
         stacked_bar(
+            &colors.track,
             NSRect::new(NSPoint::new(x, y), NSSize::new(w, 8.0)),
             &[
-                (m.app as f64 / total, NSColor::systemBlueColor()),
-                (m.wired as f64 / total, NSColor::systemOrangeColor()),
-                (m.compressed as f64 / total, NSColor::systemPurpleColor()),
-                (m.cached as f64 / total, NSColor::tertiaryLabelColor()),
+                (m.app as f64 / total, &colors.blue),
+                (m.wired as f64 / total, &colors.orange),
+                (m.compressed as f64 / total, &colors.violet),
+                (m.cached as f64 / total, &colors.muted),
             ],
         );
         y += 15.0;
         // 2 x 2 legend: label left, value right within each column.
         let legend = [
-            ("App", m.app, NSColor::systemBlueColor()),
-            ("Compressed", m.compressed, NSColor::systemPurpleColor()),
-            ("Wired", m.wired, NSColor::systemOrangeColor()),
-            ("Cached", m.cached, NSColor::tertiaryLabelColor()),
+            ("App", m.app, &colors.blue),
+            ("Compressed", m.compressed, &colors.violet),
+            ("Wired", m.wired, &colors.orange),
+            ("Cached", m.cached, &colors.muted),
         ];
         let col_w = (w - 18.0) / 2.0;
         for (i, (label, bytes, color)) in legend.into_iter().enumerate() {
@@ -578,26 +647,20 @@ impl StatsView {
             let cy = y + (i / 2) as f64 * 16.0;
             fill_oval(
                 NSRect::new(NSPoint::new(cx, cy + 4.5), NSSize::new(6.0, 6.0)),
-                &color,
+                color,
             );
-            d.text(
-                label,
-                cx + 10.0,
-                cy,
-                &d.small,
-                &NSColor::secondaryLabelColor(),
-            );
+            d.text(label, cx + 10.0, cy, &d.small, &colors.secondary);
             d.text_right(
                 &format::bytes_short(bytes),
                 cx + col_w,
                 cy,
                 &d.small_value,
-                &NSColor::labelColor(),
+                &colors.text,
             );
         }
         y += 38.0;
-        let (pcolor, plabel) = pressure_style(m.pressure);
-        d.text("Pressure", x, y, &d.small, &NSColor::secondaryLabelColor());
+        let (pcolor, plabel) = pressure_style(m.pressure, &colors);
+        d.text("Pressure", x, y, &d.small, &colors.secondary);
         let ptext = format!("{} · {:.0}%", plabel, m.pressure_pct);
         let pw = d.measure(&ptext, &d.small_value).width;
         fill_oval(
@@ -605,11 +668,11 @@ impl StatsView {
                 NSPoint::new(x + w - pw - 12.0, y + 4.5),
                 NSSize::new(7.0, 7.0),
             ),
-            &pcolor,
+            pcolor,
         );
-        d.text_right(&ptext, x + w, y, &d.small_value, &NSColor::labelColor());
+        d.text_right(&ptext, x + w, y, &d.small_value, &colors.text);
         y += 19.0;
-        d.text("Swap", x, y, &d.small, &NSColor::secondaryLabelColor());
+        d.text("Swap", x, y, &d.small, &colors.secondary);
         let swap_text = if snap.swap.total > 0 {
             format!(
                 "{} of {}",
@@ -619,7 +682,7 @@ impl StatsView {
         } else {
             "Not in use".to_string()
         };
-        d.text_right(&swap_text, x + w, y, &d.small_value, &NSColor::labelColor());
+        d.text_right(&swap_text, x + w, y, &d.small_value, &colors.text);
         y += 18.0;
         let swap_frac = if snap.swap.total > 0 {
             snap.swap.used as f64 / snap.swap.total as f64
@@ -627,21 +690,16 @@ impl StatsView {
             0.0
         };
         stacked_bar(
+            &colors.track,
             NSRect::new(NSPoint::new(x, y), NSSize::new(w, 4.0)),
-            &[(swap_frac, NSColor::systemPinkColor())],
+            &[(swap_frac, &colors.pink)],
         );
         y += 18.0;
 
         // Disk
         let v = &snap.volume;
-        d.section("DISK", x, y);
-        d.text_right(
-            &v.name,
-            x + w,
-            y - 1.0,
-            &d.small,
-            &NSColor::secondaryLabelColor(),
-        );
+        d.section(&colors.secondary, "DISK", x, y);
+        d.text_right(&v.name, x + w, y - 1.0, &d.small, &colors.secondary);
         y += 20.0;
         let used_frac = if v.total > 0 {
             v.used() as f64 / v.total as f64
@@ -649,23 +707,24 @@ impl StatsView {
             0.0
         };
         let disk_color = if used_frac > 0.92 {
-            NSColor::systemOrangeColor()
+            &colors.orange
         } else {
-            NSColor::systemTealColor()
+            &colors.teal
         };
         stacked_bar(
+            &colors.track,
             NSRect::new(NSPoint::new(x, y), NSSize::new(w, 8.0)),
             &[(used_frac, disk_color)],
         );
         y += 15.0;
         let avail = format!("{} available", format::bytes_short(v.available));
-        let aw = d.text(&avail, x, y, &d.small_value, &NSColor::labelColor());
+        let aw = d.text(&avail, x, y, &d.small_value, &colors.text);
         d.text(
             &format!(" of {}", format::bytes_short(v.total)),
             x + aw,
             y,
             &d.small,
-            &NSColor::secondaryLabelColor(),
+            &colors.secondary,
         );
         if reclaimable > 0 {
             d.text_right(
@@ -673,7 +732,7 @@ impl StatsView {
                 x + w,
                 y,
                 &d.small,
-                &NSColor::systemPinkColor(),
+                &colors.pink,
             );
         }
         y += 18.0;
@@ -682,39 +741,33 @@ impl StatsView {
             format::rate(snap.disk_io.read_per_sec),
             format::rate(snap.disk_io.write_per_sec)
         );
-        d.text(&io, x, y, &d.small, &NSColor::secondaryLabelColor());
+        d.text(&io, x, y, &d.small, &colors.secondary);
         y += 28.0;
 
         // Network & GPU
-        d.section("NETWORK", x, y);
+        d.section(&colors.secondary, "NETWORK", x, y);
         let net = format!(
             "↓ {}   ↑ {}",
             format::rate(snap.network.read_per_sec),
             format::rate(snap.network.write_per_sec)
         );
-        d.text_right(&net, x + w, y - 1.0, &d.small_value, &NSColor::labelColor());
+        d.text_right(&net, x + w, y - 1.0, &d.small_value, &colors.text);
         y += 19.0;
         if let Some(gpu) = snap.gpu {
-            d.section("GPU", x, y);
+            d.section(&colors.secondary, "GPU", x, y);
             d.text_right(
                 &format::percent(gpu),
                 x + w,
                 y - 1.0,
                 &d.small_value,
-                &NSColor::labelColor(),
+                &colors.text,
             );
         }
         y += 27.0;
 
         // Top apps
-        d.section("TOP APPS", x, y);
-        d.text_right(
-            "CPU   MEMORY",
-            x + w,
-            y,
-            &d.tiny_caps,
-            &NSColor::tertiaryLabelColor(),
-        );
+        d.section(&colors.secondary, "TOP APPS", x, y);
+        d.text_right("CPU   MEMORY", x + w, y, &d.tiny_caps, &colors.muted);
         y += 20.0;
         for app in &apps {
             let icon = self.icon(app);
@@ -729,27 +782,20 @@ impl StatsView {
                 );
             }
             let name_w = w - 22.0 - 112.0;
-            d.text_clipped(
-                &app.name,
-                x + 22.0,
-                y + 0.5,
-                name_w,
-                &d.small,
-                &NSColor::labelColor(),
-            );
+            d.text_clipped(&app.name, x + 22.0, y + 0.5, name_w, &d.small, &colors.text);
             d.text_right(
                 &format!("{:.0}%", app.cpu),
                 x + w - 64.0,
                 y + 0.5,
                 &d.small_value,
-                &NSColor::labelColor(),
+                &colors.text,
             );
             d.text_right(
                 &format::bytes_short(app.memory),
                 x + w,
                 y + 0.5,
                 &d.small,
-                &NSColor::secondaryLabelColor(),
+                &colors.secondary,
             );
             y += 21.0;
         }
@@ -767,11 +813,11 @@ fn content_height() -> f64 {
     summary + cpu + memory + disk + net + apps
 }
 
-fn pressure_style(p: Pressure) -> (Retained<NSColor>, &'static str) {
+fn pressure_style(p: Pressure, colors: &MenuColors) -> (&NSColor, &'static str) {
     match p {
-        Pressure::Normal => (NSColor::systemGreenColor(), "Normal"),
-        Pressure::Warning => (NSColor::systemYellowColor(), "Elevated"),
-        Pressure::Critical => (NSColor::systemRedColor(), "Critical"),
+        Pressure::Normal => (&colors.green, "Normal"),
+        Pressure::Warning => (&colors.amber, "Elevated"),
+        Pressure::Critical => (&colors.red, "Critical"),
     }
 }
 
@@ -797,6 +843,87 @@ fn core_groups(cores: &[CoreKind], snap: &Snapshot) -> Vec<(&'static str, usize,
 
 // ---------------------------------------------------------------------------
 // Drawing helpers (AppKit, flipped coordinates)
+
+fn native_color(color: egui::Color32) -> Retained<NSColor> {
+    let [r, g, b, a] = color.to_srgba_unmultiplied().map(|v| f64::from(v) / 255.0);
+    NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a)
+}
+
+struct MenuColors {
+    text: Retained<NSColor>,
+    secondary: Retained<NSColor>,
+    muted: Retained<NSColor>,
+    track: Retained<NSColor>,
+    green: Retained<NSColor>,
+    amber: Retained<NSColor>,
+    orange: Retained<NSColor>,
+    red: Retained<NSColor>,
+    blue: Retained<NSColor>,
+    violet: Retained<NSColor>,
+    pink: Retained<NSColor>,
+    teal: Retained<NSColor>,
+}
+
+impl MenuColors {
+    fn new(theme: Option<&Theme>) -> Self {
+        if let Some(t) = theme {
+            Self {
+                text: native_color(t.text),
+                secondary: native_color(t.text2),
+                muted: native_color(t.text3),
+                track: native_color(t.track),
+                green: native_color(t.green),
+                amber: native_color(t.amber),
+                orange: native_color(t.orange),
+                red: native_color(t.red),
+                blue: native_color(t.blue),
+                violet: native_color(t.violet),
+                pink: native_color(t.pink),
+                teal: native_color(t.teal),
+            }
+        } else {
+            Self {
+                text: NSColor::labelColor(),
+                secondary: NSColor::secondaryLabelColor(),
+                muted: NSColor::tertiaryLabelColor(),
+                track: NSColor::labelColor().colorWithAlphaComponent(0.09),
+                green: NSColor::systemGreenColor(),
+                amber: NSColor::systemYellowColor(),
+                orange: NSColor::systemOrangeColor(),
+                red: NSColor::systemRedColor(),
+                blue: NSColor::systemBlueColor(),
+                violet: NSColor::systemPurpleColor(),
+                pink: NSColor::systemPinkColor(),
+                teal: NSColor::systemTealColor(),
+            }
+        }
+    }
+}
+
+fn draw_backdrop(bounds: NSRect, t: &Theme) {
+    let panel = NSRect::new(
+        NSPoint::new(4.0, 1.0),
+        NSSize::new(bounds.size.width - 8.0, bounds.size.height - 2.0),
+    );
+    let glass = t.preset == ThemePreset::LiquidGlass;
+    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(panel, 10.0, 10.0);
+    native_color(t.bg)
+        .colorWithAlphaComponent(if glass { 0.78 } else { 1.0 })
+        .setFill();
+    path.fill();
+    if t.preset != ThemePreset::Minimal
+        && let Some(tint) = NSGradient::initWithStartingColor_endingColor(
+            NSGradient::alloc(),
+            &native_color(t.bg_glow_a),
+            &native_color(t.bg_glow_b),
+        )
+    {
+        tint.drawInBezierPath_angle(&path, 35.0);
+    }
+    native_color(t.border).setStroke();
+    path.setLineWidth(1.0);
+    path.stroke();
+}
 
 struct Draw {
     headline: Retained<NSFont>,
@@ -878,9 +1005,9 @@ impl Draw {
         self.text(&text, x, y, font, color);
     }
 
-    fn section(&self, title: &str, x: f64, y: f64) {
+    fn section(&self, color: &NSColor, title: &str, x: f64, y: f64) {
         let ns = NSString::from_str(title);
-        let attrs = Self::attrs(&self.tiny_caps, &NSColor::secondaryLabelColor(), 0.6);
+        let attrs = Self::attrs(&self.tiny_caps, color, 0.6);
         unsafe { ns.drawAtPoint_withAttributes(NSPoint::new(x, y + 1.0), Some(&attrs)) };
     }
 }
@@ -895,14 +1022,10 @@ fn fill_oval(rect: NSRect, color: &NSColor) {
     NSBezierPath::bezierPathWithOvalInRect(rect).fill();
 }
 
-fn track_color() -> Retained<NSColor> {
-    NSColor::labelColor().colorWithAlphaComponent(0.09)
-}
-
 /// A rounded bar made of consecutive coloured segments over a faint track.
-fn stacked_bar(rect: NSRect, segments: &[(f64, Retained<NSColor>)]) {
+fn stacked_bar(track: &NSColor, rect: NSRect, segments: &[(f64, &NSColor)]) {
     let r = rect.size.height / 2.0;
-    fill_round(rect, r, &track_color());
+    fill_round(rect, r, track);
     let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, r, r);
     NSGraphicsContext::saveGraphicsState_class();
     path.addClip();
@@ -922,16 +1045,13 @@ fn stacked_bar(rect: NSRect, segments: &[(f64, Retained<NSColor>)]) {
     NSGraphicsContext::restoreGraphicsState_class();
 }
 
-fn sparkline(rect: NSRect, history: &History, color: &NSColor) {
+fn sparkline(rect: NSRect, history: &History, colors: &MenuColors) {
+    let color = &colors.blue;
     let values: Vec<f32> = history.cpu.iter().collect();
     let cap = 60usize;
     let start = values.len().saturating_sub(cap);
     let values = &values[start..];
-    fill_round(
-        rect,
-        4.0,
-        &NSColor::labelColor().colorWithAlphaComponent(0.04),
-    );
+    fill_round(rect, 4.0, &colors.text.colorWithAlphaComponent(0.04));
     if values.len() < 2 {
         return;
     }
@@ -971,7 +1091,7 @@ fn sparkline(rect: NSRect, history: &History, color: &NSColor) {
     line.stroke();
 }
 
-fn core_bars(rect: NSRect, snap: &Snapshot, cores: &[CoreKind]) {
+fn core_bars(rect: NSRect, snap: &Snapshot, cores: &[CoreKind], colors: &MenuColors) {
     let n = cores.len().max(1);
     let groups = cores.windows(2).filter(|w| w[0] != w[1]).count() + 1;
     let gap = 6.0;
@@ -986,7 +1106,7 @@ fn core_bars(rect: NSRect, snap: &Snapshot, cores: &[CoreKind]) {
             NSPoint::new(x, rect.origin.y),
             NSSize::new(slot - bar_gap, rect.size.height),
         );
-        fill_round(bar, 2.0, &track_color());
+        fill_round(bar, 2.0, &colors.track);
         let load = snap
             .cpu
             .per_core
@@ -1001,15 +1121,11 @@ fn core_bars(rect: NSRect, snap: &Snapshot, cores: &[CoreKind]) {
                 NSSize::new(bar.size.width, h),
             );
             let color = match kind {
-                CoreKind::Efficiency => NSColor::systemTealColor(),
-                _ => NSColor::systemBlueColor(),
+                CoreKind::Efficiency => &colors.teal,
+                _ => &colors.blue,
             };
-            let color = if load > 0.9 {
-                NSColor::systemOrangeColor()
-            } else {
-                color
-            };
-            fill_round(fill, 2.0, &color);
+            let color = if load > 0.9 { &colors.orange } else { color };
+            fill_round(fill, 2.0, color);
         }
         x += slot;
     }
@@ -1018,18 +1134,11 @@ fn core_bars(rect: NSRect, snap: &Snapshot, cores: &[CoreKind]) {
 /// Render the stats view to PNG bytes at 2x (development aid).
 pub fn render_stats_png(mtm: MainThreadMarker, shared: Arc<Shared>, dark: bool) -> Option<Vec<u8>> {
     use objc2_app_kit::{
-        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-        NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace,
+        NSAppearanceCustomization, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace,
     };
+    let dark = dark || shared.theme_preset() == ThemePreset::Mars;
     let view = StatsView::new(mtm, shared);
-    let name = unsafe {
-        if dark {
-            NSAppearanceNameDarkAqua
-        } else {
-            NSAppearanceNameAqua
-        }
-    };
-    let appearance = NSAppearance::appearanceNamed(name)?;
+    let appearance = macos::appearance(dark)?;
     view.setAppearance(Some(&appearance));
     let bounds = view.bounds();
     let (w, h) = (

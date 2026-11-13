@@ -1,18 +1,22 @@
-//! Colours, fonts and the egui style, for dark and light appearance.
+//! Theme palettes, system fonts and the egui style.
 
 use egui::epaint::text::Blob;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Visuals};
 use std::sync::Arc;
 use tessera_core::disk::{Category, Kind};
 
+use crate::settings::ThemePreset;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
+    pub preset: ThemePreset,
     pub dark: bool,
     pub bg: Color32,
     pub bg_glow_a: Color32,
     pub bg_glow_b: Color32,
     pub card: Color32,
     pub card_hover: Color32,
+    pub popup: Color32,
     pub border: Color32,
     pub highlight: Color32,
     pub shadow: Color32,
@@ -42,12 +46,14 @@ const fn hex(v: u32) -> Color32 {
 impl Theme {
     pub fn dark() -> Self {
         Self {
+            preset: ThemePreset::Default,
             dark: true,
             bg: hex(0x0A0C12),
             bg_glow_a: Color32::from_rgba_unmultiplied(110, 90, 255, 30),
             bg_glow_b: Color32::from_rgba_unmultiplied(20, 200, 180, 18),
             card: Color32::from_rgba_unmultiplied(255, 255, 255, 9),
             card_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 14),
+            popup: hex(0x161A22),
             border: Color32::from_rgba_unmultiplied(255, 255, 255, 17),
             highlight: Color32::from_rgba_unmultiplied(255, 255, 255, 10),
             shadow: Color32::from_rgba_unmultiplied(0, 0, 0, 90),
@@ -72,12 +78,14 @@ impl Theme {
 
     pub fn light() -> Self {
         Self {
+            preset: ThemePreset::Default,
             dark: false,
             bg: hex(0xF3F5F9),
             bg_glow_a: Color32::from_rgba_unmultiplied(120, 100, 255, 26),
             bg_glow_b: Color32::from_rgba_unmultiplied(20, 190, 170, 20),
             card: Color32::from_rgba_unmultiplied(255, 255, 255, 215),
             card_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 245),
+            popup: Color32::WHITE,
             border: Color32::from_rgba_unmultiplied(15, 23, 42, 16),
             highlight: Color32::from_rgba_unmultiplied(255, 255, 255, 120),
             shadow: Color32::from_rgba_unmultiplied(15, 23, 42, 22),
@@ -100,45 +108,167 @@ impl Theme {
         }
     }
 
-    pub fn for_ctx(ctx: &egui::Context) -> Self {
-        if ctx.global_style().visuals.dark_mode {
-            Self::dark()
+    pub fn resolve(preset: ThemePreset, system_dark: bool) -> Self {
+        match preset {
+            ThemePreset::Default if system_dark => Self::dark(),
+            ThemePreset::Default => Self::light(),
+            ThemePreset::Mars => Self::mars(),
+            ThemePreset::LiquidGlass => Self::liquid_glass(system_dark),
+            ThemePreset::Minimal => Self::minimal(system_dark),
+        }
+    }
+
+    fn mars() -> Self {
+        Self {
+            preset: ThemePreset::Mars,
+            dark: true,
+            bg: hex(0x110F0F),
+            bg_glow_a: Color32::from_rgba_unmultiplied(195, 69, 37, 54),
+            bg_glow_b: Color32::from_rgba_unmultiplied(132, 83, 61, 29),
+            card: hex(0x262322),
+            card_hover: hex(0x39312E),
+            popup: hex(0x302A28),
+            border: hex(0x51413B),
+            highlight: hex(0x735244),
+            shadow: Color32::from_black_alpha(48),
+            text: hex(0xF5E8D9),
+            text2: hex(0xD3BDAA),
+            text3: hex(0xB09A8C),
+            track: hex(0x473C37),
+            grid: hex(0x38302D),
+            tile_text: Color32::WHITE,
+            blue: hex(0xF18461),   // ember
+            violet: hex(0xD4A083), // clay
+            teal: hex(0xB8ACA0),   // ash
+            cyan: hex(0xE6B890),   // sandstone
+            pink: hex(0xE7A1A0),
+            orange: hex(0xF1A25B),
+            amber: hex(0xEAC583),
+            green: hex(0xB9BB9B), // dusted sage
+            red: hex(0xFF7468),
+            indigo: hex(0xB98F94),
+        }
+    }
+
+    fn liquid_glass(dark: bool) -> Self {
+        let color = |smoked, pearl| hex(if dark { smoked } else { pearl });
+        Self {
+            preset: ThemePreset::LiquidGlass,
+            dark,
+            bg: color(0x101C30, 0xDCE5F0),
+            bg_glow_a: hex(0x2DE9DF).gamma_multiply(if dark { 0.31 } else { 0.37 }),
+            bg_glow_b: hex(0x9E83F6).gamma_multiply(if dark { 0.44 } else { 0.48 }),
+            card: color(0x314254, 0xFFFFFF).gamma_multiply(if dark { 0.46 } else { 0.62 }),
+            card_hover: color(0x416078, 0xDBE9F4),
+            popup: color(0x203344, 0xF2F8FC),
+            border: color(0xACDDE6, 0x537C9A).gamma_multiply(0.38),
+            highlight: Color32::from_white_alpha(if dark { 110 } else { 216 }),
+            shadow: color(0x020C1A, 0x364B70).gamma_multiply(if dark { 0.29 } else { 0.17 }),
+            text: color(0xF1FBFF, 0x162A3E),
+            text2: color(0xCAE0ED, 0x344F66),
+            text3: color(0xB0C9DB, 0x4B6076),
+            track: color(0xADDEEE, 0x345E7E).gamma_multiply(0.17),
+            grid: color(0xC3E8F6, 0x345E7E).gamma_multiply(0.10),
+            tile_text: Color32::WHITE,
+            blue: color(0x66E7E3, 0x006E79),
+            violet: color(0xC1B0FF, 0x7050B6),
+            teal: color(0x8CF4C3, 0x087453),
+            cyan: color(0x89CFFF, 0x206996),
+            pink: color(0xEEA5DE, 0x983F80),
+            orange: color(0xFFB784, 0x994922),
+            amber: color(0xEDCD91, 0x845B1C),
+            green: color(0x9ACDAE, 0x3C6B53),
+            red: color(0xFF9B9F, 0xA43D4F),
+            indigo: color(0x98ACFC, 0x525F9F),
+        }
+    }
+
+    fn minimal(dark: bool) -> Self {
+        let gray = |ink, paper| Color32::from_gray(if dark { ink } else { paper });
+        Self {
+            preset: ThemePreset::Minimal,
+            dark,
+            bg: gray(16, 246),
+            bg_glow_a: Color32::TRANSPARENT,
+            bg_glow_b: Color32::TRANSPARENT,
+            card: gray(23, 253),
+            card_hover: gray(48, 230),
+            popup: gray(31, 255),
+            border: gray(60, 202),
+            highlight: Color32::TRANSPARENT,
+            shadow: Color32::TRANSPARENT,
+            text: gray(242, 24),
+            text2: gray(199, 69),
+            text3: gray(158, 100),
+            track: gray(55, 225),
+            grid: gray(43, 233),
+            tile_text: Color32::WHITE,
+            blue: gray(231, 32),
+            violet: gray(140, 115),
+            teal: gray(158, 105),
+            cyan: gray(202, 64),
+            pink: gray(173, 90),
+            orange: gray(190, 89),
+            amber: gray(150, 117),
+            green: gray(135, 113),
+            red: gray(249, 16),
+            indigo: gray(119, 146),
+        }
+    }
+
+    /// Use quieter versions of metric accents across large storage tiles.
+    fn storage_color(&self, default: u32, accent: Color32) -> Color32 {
+        if self.preset == ThemePreset::Default {
+            hex(default)
         } else {
-            Self::light()
+            accent.lerp_to_gamma(self.bg, if self.dark { 0.26 } else { 0.18 })
         }
     }
 
     pub fn category(&self, c: Category) -> Color32 {
         match c {
-            Category::Apps => hex(0x3B82F6),
-            Category::Projects => hex(0x8B5CF6),
-            Category::Developer => hex(0x14B8A6),
-            Category::AiModels => hex(0xEC4899),
-            Category::Media => hex(0xF97316),
-            Category::Documents => hex(0xEAB308),
-            Category::AppData => hex(0x6366F1),
-            Category::Caches => hex(0xF43F5E),
-            Category::Trash => hex(0xFB7185),
-            Category::System => hex(0x64748B),
-            Category::Other => hex(0x8B95A7),
+            Category::Apps => self.storage_color(0x3B82F6, self.blue),
+            Category::Projects => self.storage_color(0x8B5CF6, self.violet),
+            Category::Developer => self.storage_color(0x14B8A6, self.teal),
+            Category::AiModels => self.storage_color(0xEC4899, self.pink),
+            Category::Media => self.storage_color(0xF97316, self.orange),
+            Category::Documents => self.storage_color(0xEAB308, self.amber),
+            Category::AppData => self.storage_color(0x6366F1, self.indigo),
+            Category::Caches => self.storage_color(0xF43F5E, self.red),
+            Category::Trash => self.storage_color(0xFB7185, self.cyan),
+            Category::System => self.storage_color(0x64748B, self.text3),
+            Category::Other => self.storage_color(0x8B95A7, self.text2),
         }
     }
 
     /// Tile colour for a node of `kind` inside a block of base colour `base`.
     pub fn kind_color(&self, kind: Kind, base: Color32) -> Color32 {
         match kind {
-            Kind::Artifacts | Kind::Cache => hex(0xF43F5E),
-            Kind::Git => hex(0xF59E0B),
-            Kind::App => hex(0x3B82F6),
-            Kind::Project => hex(0x8B5CF6),
-            Kind::VirtualMachine | Kind::VmDisk => hex(0x14B8A6),
-            Kind::Video => hex(0xF97316),
-            Kind::Image | Kind::MediaLibrary => hex(0xFB923C),
-            Kind::Audio => hex(0xEC4899),
-            Kind::Archive | Kind::DiskImage => hex(0xEAB308),
-            Kind::Model => hex(0xD946EF),
-            Kind::Database => hex(0x6366F1),
+            Kind::Artifacts | Kind::Cache => self.category(Category::Caches),
+            Kind::Git => self.storage_color(0xF59E0B, self.amber),
+            Kind::App => self.category(Category::Apps),
+            Kind::Project => self.category(Category::Projects),
+            Kind::VirtualMachine | Kind::VmDisk => self.category(Category::Developer),
+            Kind::Video => self.category(Category::Media),
+            Kind::Image | Kind::MediaLibrary => self.storage_color(0xFB923C, self.cyan),
+            Kind::Audio => self.category(Category::AiModels),
+            Kind::Archive | Kind::DiskImage => self.category(Category::Documents),
+            Kind::Model => self.storage_color(0xD946EF, self.pink),
+            Kind::Database => self.category(Category::AppData),
             _ => base,
+        }
+    }
+
+    /// Pick the higher contrast ink after compositing translucent tiles.
+    pub fn tile_ink(&self, fill: Color32) -> Color32 {
+        let surface = self.bg.blend(self.card).blend(fill);
+        let linear = egui::Rgba::from(surface);
+        let luminance = 0.2126 * linear.r() + 0.7152 * linear.g() + 0.0722 * linear.b();
+        // Black and white have equal contrast at relative luminance 0.179.
+        if luminance > 0.179 {
+            Color32::BLACK
+        } else {
+            self.tile_text
         }
     }
 
@@ -151,18 +281,14 @@ impl Theme {
         }
     }
 
-    pub fn apply(&self, ctx: &egui::Context) {
+    pub fn apply(&self, ctx: &egui::Context, slot: egui::Theme) {
         let mut visuals = if self.dark {
             Visuals::dark()
         } else {
             Visuals::light()
         };
         visuals.panel_fill = self.bg;
-        visuals.window_fill = if self.dark {
-            hex(0x161A22)
-        } else {
-            hex(0xFFFFFF)
-        };
+        visuals.window_fill = self.popup;
         visuals.window_stroke = egui::Stroke::new(1.0, self.border);
         visuals.window_corner_radius = egui::CornerRadius::same(12);
         visuals.menu_corner_radius = egui::CornerRadius::same(10);
@@ -194,14 +320,26 @@ impl Theme {
         visuals.widgets.inactive.bg_fill = self.track;
         visuals.widgets.hovered.weak_bg_fill = self.card_hover;
         visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        ctx.set_visuals_of(
-            if self.dark {
-                egui::Theme::Dark
-            } else {
-                egui::Theme::Light
-            },
-            visuals,
-        );
+        if self.preset != ThemePreset::Default {
+            visuals.weak_text_color = Some(self.text3);
+            visuals.selection.bg_fill = self.blue.gamma_multiply(0.22);
+            visuals.selection.stroke.color = self.text;
+            visuals.faint_bg_color = self.grid;
+            visuals.extreme_bg_color = self.bg;
+            visuals.warn_fg_color = self.amber;
+            visuals.error_fg_color = self.red;
+            for widget in [
+                &mut visuals.widgets.hovered,
+                &mut visuals.widgets.active,
+                &mut visuals.widgets.open,
+            ] {
+                widget.weak_bg_fill = self.card_hover;
+                widget.bg_fill = self.card_hover;
+                widget.fg_stroke.color = self.text;
+                widget.bg_stroke.color = self.border;
+            }
+        }
+        ctx.set_visuals_of(slot, visuals);
     }
 }
 
