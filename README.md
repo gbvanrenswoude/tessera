@@ -58,6 +58,10 @@ GPU, plus an interactive map of what is taking up your disk.
   - Hover for details: size, share of parent, file count, last modified,
     project language, reclaimable space
   - Right-click for *Reveal in Finder*, *Open*, *Copy Path*
+  - *What grew?* compares the last two scans and lists up to 50 projects
+    and folders with the largest increases in allocated space. Click a row
+    to open that folder in the map. “At least” marks a lower bound when the
+    earlier scan grouped the folder with smaller items.
   - Projects are detected from `Cargo.toml`, `package.json`, `.git`,
     `go.mod`, `pyproject.toml`, Xcode projects, Godot, Unity, Unreal and
     more. Build output (`node_modules`, `target`, `.venv`, DerivedData, …)
@@ -92,7 +96,11 @@ re-walk the disk every time you open the window:
 - Sizes are allocated bytes (what the files actually occupy on disk).
   Hard links are counted once. Evicted iCloud/File Provider placeholders
   are not downloaded.
-- The index is stored at `~/Library/Application Support/Tessera/disk-index.bin`.
+- Tessera alternates between `disk-index.bin` and `disk-index-alt.bin` in
+  `~/Library/Application Support/Tessera`. It loads the latest map at launch.
+  Opening *What grew?* reads the previous index once in the background,
+  compares the two and releases it. After upgrading or changing scan
+  coverage, the comparison needs two scans with matching coverage.
   The first scan runs at user-initiated priority. After that, Tessera rescans
   in the background at utility priority every 6 hours, or when you choose
   *Rescan*.
@@ -118,7 +126,8 @@ Measured on an M3 Pro (12 cores, 2.2 million files):
   movement. A frame costs about 0.5 ms of CPU to lay out.
 - macOS keeps the window's GPU buffers (tens of MB, more on large displays)
   after you close the dashboard, until Tessera quits.
-- On disk: 9.6 MB for the app and 1.3 MB for the index.
+- In this measurement, the app used 9.6 MB and each disk index used 1.3 MB.
+  Tessera keeps up to two indexes.
 
 ## Install
 

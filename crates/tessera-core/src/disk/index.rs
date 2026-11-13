@@ -16,7 +16,7 @@ use super::scan::{DATA_VOLUME, Tmp, flags};
 pub type NodeId = u32;
 
 const MAGIC: &[u8; 8] = b"TESSIDX\0";
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Node {
@@ -59,6 +59,18 @@ pub struct IndexStats {
     pub duration: Duration,
 }
 
+/// Information needed to distinguish changes in what was scanned from growth.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ScanCoverage {
+    pub root_device: u64,
+    pub root_inode: u64,
+    pub excluded: Vec<PathBuf>,
+    pub min_dir: u64,
+    pub min_file: u64,
+    pub max_children: usize,
+    pub denied_digest: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiskIndex {
     pub root_path: PathBuf,
@@ -70,6 +82,9 @@ pub struct DiskIndex {
     pub other_volumes: Vec<OtherVolume>,
     nodes: Vec<Node>,
     names: String,
+    // Stored alongside the original v3 payload so existing maps still load.
+    #[serde(skip)]
+    pub(crate) coverage: Option<ScanCoverage>,
 }
 
 impl DiskIndex {
@@ -92,6 +107,7 @@ impl DiskIndex {
             },
             nodes: Vec::new(),
             names: String::new(),
+            coverage: None,
         };
         let mut queue: VecDeque<(Tmp, NodeId)> = VecDeque::new();
         let root_id = index.push(&root, NodeId::MAX);
@@ -238,18 +254,32 @@ impl DiskIndex {
         self.nodes.first().map(|n| n.size).unwrap_or(0)
     }
 
+    pub fn has_same_coverage(&self, other: &Self) -> bool {
+        self.root_path == other.root_path
+            && self.data_volume == other.data_volume
+            && self.stats.denied == other.stats.denied
+            && self.coverage.is_some()
+            && self.coverage == other.coverage
+    }
+
     // -- persistence --------------------------------------------------------
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        self.save_with_sequence(path, 0)
+    }
+
+    /// Sequence orders the two cache slots even when the wall clock changes.
+    pub fn save_with_sequence(&self, path: &Path, sequence: u64) -> io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let body = postcard::to_stdvec(self).map_err(io::Error::other)?;
-        let tmp = path.with_extension("tmp");
+        let body = postcard::to_stdvec(&(self, &self.coverage)).map_err(io::Error::other)?;
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
         {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(MAGIC)?;
             f.write_all(&FORMAT_VERSION.to_le_bytes())?;
+            f.write_all(&sequence.to_le_bytes())?;
             f.write_all(&body)?;
             f.sync_all()?;
         }
@@ -257,20 +287,46 @@ impl DiskIndex {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
+        Self::load_with_sequence(path).map(|(_, index)| index)
+    }
+
+    /// Reads only the header, to choose a cache slot without decoding a map.
+    pub fn stored_sequence(path: &Path) -> io::Result<u64> {
+        Self::read_header(&mut std::fs::File::open(path)?).map(|(_, sequence)| sequence)
+    }
+
+    pub fn load_with_sequence(path: &Path) -> io::Result<(u64, Self)> {
         let mut f = std::fs::File::open(path)?;
+        let (version, sequence) = Self::read_header(&mut f)?;
+        let mut body = Vec::new();
+        f.read_to_end(&mut body)?;
+        let index = if version == 3 {
+            postcard::from_bytes(&body)
+        } else {
+            postcard::from_bytes::<(Self, Option<ScanCoverage>)>(&body).map(|(mut index, scope)| {
+                index.coverage = scope;
+                index
+            })
+        }
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok((sequence, index))
+    }
+
+    fn read_header(f: &mut std::fs::File) -> io::Result<(u32, u64)> {
         let mut header = [0u8; 12];
         f.read_exact(&mut header)?;
-        if &header[..8] != MAGIC
-            || u32::from_le_bytes(header[8..12].try_into().unwrap()) != FORMAT_VERSION
-        {
+        let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        if &header[..8] != MAGIC || !matches!(version, 3 | FORMAT_VERSION) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "index format changed",
             ));
         }
-        let mut body = Vec::new();
-        f.read_to_end(&mut body)?;
-        postcard::from_bytes(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let mut seq = [0u8; 8];
+        if version == FORMAT_VERSION {
+            f.read_exact(&mut seq)?;
+        }
+        Ok((version, u64::from_le_bytes(seq)))
     }
 }
 
@@ -379,6 +435,7 @@ mod tests {
         std::fs::write(dir.join("proj/target/debug/big.bin"), vec![0u8; 3 << 20]).unwrap();
 
         let cfg = ScanConfig {
+            threads: 1,
             min_dir: 0,
             min_file: 1 << 20,
             ..ScanConfig::for_path(&dir)
@@ -398,6 +455,17 @@ mod tests {
         let loaded = DiskIndex::load(&file).unwrap();
         assert_eq!(loaded.len(), index.len());
         assert_eq!(loaded.name(big), "big.bin");
+        assert!(loaded.has_same_coverage(&index));
+
+        // v3 had only the original postcard payload. It remains a valid map
+        // on upgrade, but its permission and exclusion coverage is unknown.
+        let mut legacy = MAGIC.to_vec();
+        legacy.extend(3u32.to_le_bytes());
+        legacy.extend(postcard::to_stdvec(&index).unwrap());
+        std::fs::write(&file, legacy).unwrap();
+        let loaded = DiskIndex::load(&file).unwrap();
+        assert_eq!(loaded.name(big), "big.bin");
+        assert!(!loaded.has_same_coverage(&index));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

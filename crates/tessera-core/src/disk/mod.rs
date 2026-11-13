@@ -1,5 +1,6 @@
 //! Disk scanning, the persisted index, and the semantic overview on top.
 
+pub mod changes;
 pub mod index;
 pub mod kinds;
 pub mod overview;

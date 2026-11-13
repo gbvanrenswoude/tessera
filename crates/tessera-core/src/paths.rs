@@ -34,6 +34,10 @@ pub fn index_file() -> PathBuf {
     support_dir().join("disk-index.bin")
 }
 
+pub fn alternate_index_file() -> PathBuf {
+    support_dir().join("disk-index-alt.bin")
+}
+
 pub fn settings_file() -> PathBuf {
     support_dir().join("settings.json")
 }

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rayon::prelude::*;
 
-use super::index::{DiskIndex, IndexStats};
+use super::index::{DiskIndex, IndexStats, ScanCoverage};
 use super::kinds::{Kind, Lang, Markers, dir_kind, file_kind};
 
 /// Node flags stored in the index.
@@ -146,6 +146,7 @@ struct Walker<'a> {
     root_dev: u64,
     hard_links: Mutex<HashSet<u64>>,
     denied_paths: Mutex<Vec<String>>,
+    denied_digest: AtomicU64,
 }
 
 pub fn scan(cfg: &ScanConfig, progress: &ScanProgress) -> io::Result<DiskIndex> {
@@ -184,6 +185,7 @@ pub fn scan(cfg: &ScanConfig, progress: &ScanProgress) -> io::Result<DiskIndex> 
         root_dev: root_dev as u64,
         hard_links: Mutex::new(HashSet::new()),
         denied_paths: Mutex::new(Vec::new()),
+        denied_digest: AtomicU64::new(0),
     };
     let ctx = Ctx {
         parent_markers: Markers::empty(),
@@ -194,6 +196,17 @@ pub fn scan(cfg: &ScanConfig, progress: &ScanProgress) -> io::Result<DiskIndex> 
     let mut root = pool.install(|| walker.walk(&cfg.root, b"".to_vec().into_boxed_slice(), ctx));
     if progress.is_cancelled() {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
+    }
+    if progress.dirs.load(Ordering::Relaxed) == 0 {
+        // A root that disappeared or could not be opened is not a successful scan.
+        return Err(io::Error::new(
+            if root.flags & flags::DENIED != 0 {
+                io::ErrorKind::PermissionDenied
+            } else {
+                io::ErrorKind::Other
+            },
+            "scan root is unreadable",
+        ));
     }
     root.name = root_display_name(&cfg.root).into_bytes().into_boxed_slice();
     root.kind = Kind::Folder;
@@ -206,13 +219,20 @@ pub fn scan(cfg: &ScanConfig, progress: &ScanProgress) -> io::Result<DiskIndex> 
         duration: started.elapsed(),
     };
     let scanned_at = SystemTime::now();
-    Ok(DiskIndex::from_tree(
-        root,
-        cfg.root.clone(),
-        cfg.data_volume,
-        scanned_at,
-        stats,
-    ))
+    let mut excluded: Vec<_> = walker.exclude.into_iter().collect();
+    excluded.sort_unstable();
+    let mut index =
+        DiskIndex::from_tree(root, cfg.root.clone(), cfg.data_volume, scanned_at, stats);
+    index.coverage = Some(ScanCoverage {
+        root_device: root_dev,
+        root_inode: std::os::unix::fs::MetadataExt::ino(&root_meta),
+        excluded,
+        min_dir: cfg.min_dir,
+        min_file: cfg.min_file,
+        max_children: cfg.max_children,
+        denied_digest: walker.denied_digest.into_inner(),
+    });
+    Ok(index)
 }
 
 fn root_display_name(root: &Path) -> String {
@@ -249,6 +269,16 @@ impl Walker<'_> {
                 if matches!(e.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM)) {
                     node.flags |= flags::DENIED;
                     self.progress.denied.fetch_add(1, Ordering::Relaxed);
+                    // Stable FNV-1a per path; addition makes the set digest
+                    // independent of the order in which workers finish.
+                    let hash = path
+                        .as_os_str()
+                        .as_bytes()
+                        .iter()
+                        .fold(0xcbf29ce484222325u64, |hash, &byte| {
+                            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+                        });
+                    self.denied_digest.fetch_add(hash, Ordering::Relaxed);
                     if let Ok(mut d) = self.denied_paths.lock()
                         && d.len() < 64
                     {

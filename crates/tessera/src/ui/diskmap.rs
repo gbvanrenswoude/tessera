@@ -24,6 +24,11 @@ use super::theme::{self, Theme};
 use crate::macos;
 use crate::state::Shared;
 
+mod growth;
+use growth::growth_rows;
+#[cfg(test)]
+mod growth_test;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Level {
     Overview,
@@ -90,6 +95,7 @@ pub struct DiskMap {
     list_hovered: Option<usize>,
     context: Option<(usize, Option<usize>)>,
     focus: bool,
+    show_growth: bool,
     generation: u64,
     fda: Option<(u64, bool)>,
     pending_crumb: Option<usize>,
@@ -121,15 +127,27 @@ impl DiskMap {
         let head_y = rect.top() + 14.0;
         paint::section(&p, pos2(x, head_y + 3.0), "Storage", t);
         let crumbs_x = x + 74.0;
-        self.breadcrumbs(
-            ui,
-            &p,
-            pos2(crumbs_x, head_y),
-            view.overview.as_deref(),
-            view.index.as_deref(),
-            t,
-        );
-        self.header_right(ui, &p, rect, shared, &view, t);
+        let controls_left = self.header_right(ui, &p, rect, shared, &view, t);
+        if self.show_growth {
+            p.text(
+                pos2(crumbs_x, head_y),
+                Align2::LEFT_TOP,
+                "What grew?",
+                theme::font(13.0, theme::SEMIBOLD),
+                t.text,
+            );
+        } else {
+            let crumb_rect = Rect::from_min_max(rect.min, pos2(controls_left, rect.top() + 44.0));
+            let mut crumbs = ui.new_child(UiBuilder::new().max_rect(crumb_rect));
+            crumbs.set_clip_rect(ui.clip_rect().intersect(crumb_rect));
+            self.breadcrumbs(
+                &mut crumbs,
+                &ui.painter_at(crumb_rect),
+                pos2(crumbs_x, head_y),
+                view.index.as_deref(),
+                t,
+            );
+        }
 
         let body = Rect::from_min_max(
             pos2(x, rect.top() + 48.0),
@@ -145,6 +163,36 @@ impl DiskMap {
             self.revalidate(&index);
             self.layout = None;
             debug_initial_level(&mut self.stack, &index, &overview);
+        }
+
+        if self.show_growth {
+            if map_back(&ctx) {
+                self.show_growth = false;
+                ctx.request_repaint();
+            } else {
+                use crate::disk::ChangesState;
+                let message = match shared.disk.changes(&index, move || ctx.request_repaint()) {
+                    ChangesState::Ready(changes) => {
+                        if let Some((cat, id)) = growth_rows(ui, body, &changes, &index, t) {
+                            self.open_growth(&index, cat, id);
+                            ui.ctx().request_repaint();
+                        }
+                        None
+                    }
+                    ChangesState::Loading => Some("Comparing the last two scans…".into()),
+                    ChangesState::Unavailable(reason) => Some(reason),
+                };
+                if let Some(message) = message {
+                    p.text(
+                        body.center(),
+                        Align2::CENTER_CENTER,
+                        message,
+                        theme::font(14.0, theme::MEDIUM),
+                        t.text2,
+                    );
+                }
+            }
+            return;
         }
 
         let map_rect = Rect::from_min_max(
@@ -227,10 +275,7 @@ impl DiskMap {
         if resp.secondary_clicked() {
             self.context = hover_pos.and_then(|pos| hit(self.layout.as_ref().unwrap(), pos));
         }
-        let back = ctx.input(|i| {
-            i.key_pressed(Key::Escape) || i.pointer.button_clicked(PointerButton::Extra1)
-        }) || (ctx.input(|i| i.key_pressed(Key::ArrowUp) && i.modifiers.command));
-        if back && self.stack.len() > 1 && !animating {
+        if map_back(&ctx) && self.stack.len() > 1 && !animating {
             self.go_to(
                 self.stack.len() - 2,
                 &index,
@@ -391,6 +436,24 @@ impl DiskMap {
         self.stack = keep;
     }
 
+    fn open_growth(&mut self, index: &DiskIndex, cat: Category, id: NodeId) {
+        self.stack = vec![
+            Level::Overview,
+            Level::Group(cat),
+            Level::Node {
+                id,
+                cat,
+                path: index.path(id),
+            },
+        ];
+        self.show_growth = false;
+        self.layout = None;
+        self.transition = None;
+        self.context = None;
+        self.list_hovered = None;
+        self.pending_crumb = None;
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn open(
         &mut self,
@@ -500,7 +563,6 @@ impl DiskMap {
         ui: &mut Ui,
         p: &Painter,
         pos: egui::Pos2,
-        overview: Option<&Overview>,
         index: Option<&DiskIndex>,
         t: &Theme,
     ) {
@@ -545,7 +607,6 @@ impl DiskMap {
                 x += 14.0;
             }
         }
-        let _ = overview;
         if let Some(i) = clicked {
             self.pending_crumb = Some(i);
         }
@@ -557,6 +618,14 @@ enum MenuAction {
     Reveal(PathBuf),
     OpenPath(PathBuf),
     Up,
+}
+
+fn map_back(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        i.key_pressed(Key::Escape)
+            || i.pointer.button_clicked(PointerButton::Extra1)
+            || (i.key_pressed(Key::ArrowUp) && i.modifiers.command)
+    })
 }
 
 fn same_level(a: &Level, b: &Level) -> bool {
@@ -1166,7 +1235,7 @@ impl DiskMap {
         shared: &Arc<Shared>,
         view: &crate::disk::DiskView,
         t: &Theme,
-    ) {
+    ) -> f32 {
         let y = rect.top() + 23.0;
         let mut x = rect.right() - 18.0;
 
@@ -1176,6 +1245,22 @@ impl DiskMap {
             self.focus = !self.focus;
             x = r.left() - 8.0;
         } else {
+            x -= text_button_width(p, label) + 8.0;
+        }
+
+        if view.index.is_some() {
+            let label = if self.show_growth {
+                "Disk map"
+            } else {
+                "What grew?"
+            };
+            if button(ui, p, pos2(x, y), label, t, ("map-growth", 0)).is_some() {
+                self.show_growth = !self.show_growth;
+                self.transition = None;
+                self.pending_crumb = None;
+                self.list_hovered = None;
+                ui.ctx().request_repaint();
+            }
             x -= text_button_width(p, label) + 8.0;
         }
 
@@ -1237,10 +1322,11 @@ impl DiskMap {
             if !granted {
                 let label = "Grant Full Disk Access";
                 let w = text_button_width(p, label);
-                if x - w > rect.left() + 420.0
-                    && button(ui, p, pos2(x, y), label, t, ("map-fda", 0)).is_some()
-                {
-                    macos::open_full_disk_access_settings();
+                if x - w > rect.left() + 340.0 {
+                    if button(ui, p, pos2(x, y), label, t, ("map-fda", 0)).is_some() {
+                        macos::open_full_disk_access_settings();
+                    }
+                    x -= w + 8.0;
                 }
             }
         }
@@ -1253,6 +1339,7 @@ impl DiskMap {
                 t.red,
             );
         }
+        x
     }
 
     fn empty_state(
